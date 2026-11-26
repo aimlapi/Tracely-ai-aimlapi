@@ -14,7 +14,7 @@ export const LLM_GATEWAYS: { id: LlmGateway; label: string; placeholder: string;
 
 /** What a workspace with no key yet starts on in the form. A configured workspace always shows
  *  the gateway its key was saved with. */
-export const DEFAULT_LLM_GATEWAY: LlmGateway = "openrouter";
+export const DEFAULT_LLM_GATEWAY: LlmGateway = "aimlapi";
 
 /** Settings -> LLM key: a workspace's own OpenRouter (or AI/ML API) key for its eval spend
  *  (judge, failure intelligence, meta-analysis, rolling summary), instead of billing to ours. The

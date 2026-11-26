@@ -19,9 +19,18 @@ describe("LlmKeyPanel", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
 
-  it("keeps OpenRouter as the starting choice", async () => {
-    expect(DEFAULT_LLM_GATEWAY).toBe("openrouter");
+  it("starts a workspace with no key on AI/ML API", async () => {
+    expect(DEFAULT_LLM_GATEWAY).toBe("aimlapi");
     render(<LlmKeyPanel />);
+    const select = (await screen.findByLabelText("LLM provider")) as HTMLSelectElement;
+    expect(select.value).toBe("aimlapi");
+  });
+
+  it("keeps a configured OpenRouter workspace on OpenRouter", async () => {
+    current = { configured: true, provider: "openrouter" };
+    render(<LlmKeyPanel />);
+    expect(await screen.findByText(/A workspace OpenRouter key is configured/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Replace"));
     const select = (await screen.findByLabelText("LLM provider")) as HTMLSelectElement;
     expect(select.value).toBe("openrouter");
   });
