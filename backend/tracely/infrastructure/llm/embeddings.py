@@ -18,7 +18,7 @@ def embeddings_enabled() -> bool:
         return bool(provider.effective_openrouter_key())
     if settings.require_project_llm_key:
         return False
-    return bool(settings.openrouter_api_key or settings.openai_api_key)
+    return bool(settings.openrouter_api_key or settings.aimlapi_api_key or settings.openai_api_key)
 
 
 class Embedder:
@@ -48,7 +48,7 @@ class Embedder:
         # `openai/text-embedding-3-small`, OpenAI wants it bare.
         key = self._api_key_arg or provider.effective_openrouter_key()
         if key:
-            return (name if "/" in name else f"openai/{name}"), key, settings.openrouter_base_url
+            return (name if "/" in name else f"openai/{name}"), key, provider.gateway_base_url()
         if provider.project_scoped() or settings.require_project_llm_key:
             # Workspace key or nothing — never the server's OpenAI key. The hard-gate flag
             # extends that to unscoped calls too (a path that forgot `use_project_key()`).
@@ -72,8 +72,11 @@ class Embedder:
             from langchain_openai import OpenAIEmbeddings
 
             model, api_key, base_url = self._resolved()
+            extra = (
+                provider.gateway_client_kwargs() if base_url == provider.AIMLAPI_BASE_URL else {}
+            )
             self._client = OpenAIEmbeddings(
-                model=model, api_key=api_key, base_url=base_url, dimensions=self.dimensions
+                model=model, api_key=api_key, base_url=base_url, dimensions=self.dimensions, **extra
             )
         return self._client
 

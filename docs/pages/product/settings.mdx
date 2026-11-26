@@ -23,6 +23,8 @@ import { Callout } from "nextra/components";
 | Scenarios | the attacker (adversarial) and the turn graders |
 | Judge calibration | needs a judge to calibrate |
 
+The same panel takes an [AI/ML API](https://aimlapi.com) key instead: pick **AI/ML API** next to the key. Calls then go to `https://api.aimlapi.com/v1` with the same `provider/model` ids; decision models (TypeSafe Jev) need an OpenRouter key.
+
 Without a key those features degrade rather than fail: structural evaluators still grade, structural clusters still form, the cross-metric analysis runs **stats only**. A key with **no credits** behaves the same way as no key — the call fails, the feature falls back — so if a panel says *stats only* or *Add an OpenRouter key first* while a key is configured, check the key's balance on openrouter.ai.
 
 <Callout type="info">

@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # OpenRouter's Decisions API — where decision models (classifiers such as TypeSafe Jev) are
     # served; they have no chat endpoint. See `provider.run_decision`.
     openrouter_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
+    # AI/ML API (aimlapi.com) — an OpenAI-compatible gateway, offered next to OpenRouter. The
+    # endpoint itself is pinned in `provider.AIMLAPI_BASE_URL` (the key is only ever sent to
+    # api.aimlapi.com); this is the optional server-wide key, used only when OPENROUTER_API_KEY is
+    # blank, so a deployment that already runs on OpenRouter is unaffected by setting it.
+    aimlapi_api_key: str = ""
     # Symmetric key (any string, >=32 chars — SHA256-derived into a Fernet key, same UX as
     # SESSION_SECRET) encrypting a workspace's own OpenRouter key at rest in Postgres
     # (`Project.openrouter_api_key_encrypted`). Only needed once a workspace sets its own key —

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -201,10 +202,13 @@ async def seed_project_demo(project_id: str = Depends(get_project_id)) -> dict:
 
 class OpenRouterKeyIn(BaseModel):
     api_key: str = Field(min_length=1, max_length=200)
+    # The gateway that issued the key. Omitted = OpenRouter, as before.
+    provider: Literal["openrouter", "aimlapi"] = "openrouter"
 
 
 class OpenRouterKeyOut(BaseModel):
     configured: bool
+    provider: Literal["openrouter", "aimlapi"] | None = None
 
 
 class UiPrefsBody(BaseModel):
@@ -298,19 +302,23 @@ async def set_rolling_summary_config(
 
 @router.get("/project/llm-key", response_model=OpenRouterKeyOut)
 async def get_llm_key(project_id: str = Depends(get_project_id)) -> OpenRouterKeyOut:
-    def work() -> bool:
+    def work() -> OpenRouterKeyOut:
         with SyncSessionLocal() as s:
             proj = repo.project_get(s, project_id)
-            return bool(proj and proj.openrouter_api_key_encrypted)
+            if not (proj and proj.openrouter_api_key_encrypted):
+                return OpenRouterKeyOut(configured=False)
+            gateway = "aimlapi" if proj.llm_provider == provider.AIMLAPI else "openrouter"
+            return OpenRouterKeyOut(configured=True, provider=gateway)
 
-    return OpenRouterKeyOut(configured=await run_in_threadpool(work))
+    return await run_in_threadpool(work)
 
 
 @router.put("/project/llm-key", response_model=OpenRouterKeyOut, dependencies=[Depends(require_user)])
 async def set_llm_key(
     body: OpenRouterKeyIn, project_id: str = Depends(get_project_id)
 ) -> OpenRouterKeyOut:
-    """Set this workspace's own OpenRouter key. It is REQUIRED for every LLM-backed feature
+    """Set this workspace's own LLM key: an OpenRouter key, or an AI/ML API key with
+    `provider: "aimlapi"`. It is REQUIRED for every LLM-backed feature
     (judge evaluators, clustering/failure intelligence, meta-analysis, rolling summary, scenario
     gates) — without one those degrade to no-op. The key itself is never returned again; only
     whether one is configured."""
@@ -322,14 +330,16 @@ async def set_llm_key(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None
 
+    gateway = provider.AIMLAPI if body.provider == "aimlapi" else None
+
     def work() -> bool:
         with SyncSessionLocal() as s:
-            return repo.project_set_openrouter_key(s, project_id, encrypted)
+            return repo.project_set_openrouter_key(s, project_id, encrypted, gateway)
 
     if not await run_in_threadpool(work):
         raise HTTPException(status_code=404, detail="project not found")
     provider.invalidate_project_key(project_id)
-    return OpenRouterKeyOut(configured=True)
+    return OpenRouterKeyOut(configured=True, provider=body.provider)
 
 
 @router.delete("/project/llm-key", response_model=OpenRouterKeyOut, dependencies=[Depends(require_user)])

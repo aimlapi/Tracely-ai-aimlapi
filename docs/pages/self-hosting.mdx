@@ -95,5 +95,8 @@ the production-hardening runbook (auth guards, backups, post-deploy verification
 <Callout type="info">
   **LLM judges on self-host.** Each workspace brings its own OpenRouter key (**Settings →
   OpenRouter key**), encrypted with your `SECRETS_ENCRYPTION_KEY`. No key = structural checks
-  still run; the LLM judges, failure analysis and summaries switch off gracefully.
+  still run; the LLM judges, failure analysis and summaries switch off gracefully. An
+  [AI/ML API](https://aimlapi.com) key works in the same slot (pick **AI/ML API** next to the key,
+  or set `AIMLAPI_API_KEY` server-wide with no `OPENROUTER_API_KEY`); decision models such as
+  TypeSafe Jev stay on OpenRouter.
 </Callout>

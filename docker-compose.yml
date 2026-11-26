@@ -42,6 +42,8 @@ x-app-env: &app-env
   COLUMN_DEFAULT_MODEL: ${COLUMN_DEFAULT_MODEL:-typesafe/jev-1.13}
   LLM_JUDGE_MODEL: ${LLM_JUDGE_MODEL:-openai/gpt-6-luna}
   OPENROUTER_DECISIONS_URL: ${OPENROUTER_DECISIONS_URL:-https://openrouter.ai/api/alpha/decisions}
+  # AI/ML API (api.aimlapi.com): server-wide key, used only when OPENROUTER_API_KEY is blank.
+  AIMLAPI_API_KEY: ${AIMLAPI_API_KEY:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   LLM_JUDGE_API_KEY: ${OPENAI_API_KEY:-}
   # Encrypts a workspace's own OpenRouter key (Settings -> LLM key) at rest. Any string

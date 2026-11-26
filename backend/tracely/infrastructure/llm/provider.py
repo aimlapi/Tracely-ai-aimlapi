@@ -14,6 +14,10 @@
   evaluator-generation/model-list/cost routers) wraps its work in this; everything above —
   `get_chat_model`, `llm_enabled`, `list_models` — picks it up automatically via
   `effective_openrouter_key()`, so no call site below the wrap needs to know about it.
+- AI/ML API (`AIMLAPI_BASE_URL`) is the second gateway: OpenAI-compatible, same `provider/model`
+  ids. A workspace picks it next to its key (`Project.llm_provider`); a deployment can set
+  `AIMLAPI_API_KEY` instead of `OPENROUTER_API_KEY`. `effective_gateway()` says which one is in
+  effect, and only that gateway's host ever sees the key. Decision models stay OpenRouter-only.
 
 Heavy imports are lazy so the worker/API start even when the LLM stack isn't exercised.
 """
@@ -23,6 +27,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import contextvars
+import functools
 import json
 import time
 from typing import Any, AsyncIterator, Callable, Iterator, TypeVar
@@ -53,6 +58,21 @@ _project_key_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # hand over customers' OpenRouter keys — you'd still need SECRETS_ENCRYPTION_KEY. Fernet decrypt
 # is microseconds; the Postgres round-trip was the actual cost.
 _KEY_CACHE = "tracely:llm:key:{project}"
+# Which gateway the key in `_project_key_ctx` belongs to. Set together with it, so a key can never
+# be sent to a gateway that didn't issue it.
+_gateway_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "tracely_project_llm_gateway", default="openrouter"
+)
+OPENROUTER = "openrouter"
+AIMLAPI = "aimlapi"
+LLM_GATEWAYS = (OPENROUTER, AIMLAPI)
+# Pinned rather than configurable: the key goes to this exact host and nowhere else (no
+# `*_BASE_URL` override that could point a customer's key at another server).
+AIMLAPI_BASE_URL = "https://api.aimlapi.com/v1"
+# Only for an AI/ML API workspace: the cached ciphertext carries its gateway as a prefix. Fernet
+# tokens are urlsafe base64 (no ':'), so a bare token, including every entry cached before this
+# existed, reads as OpenRouter.
+_AIMLAPI_TOKEN_PREFIX = f"{AIMLAPI}:"
 _KEY_CACHE_TTL_S = 300
 _redis_client: Any = None
 
@@ -222,7 +242,8 @@ def _decrypt_project_key(token: str) -> str | None:
 
 
 def effective_openrouter_key() -> str:
-    """The OpenRouter key in effect right now.
+    """The LLM gateway key in effect right now (OpenRouter's, or AI/ML API's when
+    `effective_gateway()` says so — the name predates the second gateway).
 
     Inside `use_project_key()` that is the project's OWN key and nothing else: a workspace with
     no key configured gets `""`, never the server-wide key. Customers pay for their own eval
@@ -232,8 +253,47 @@ def effective_openrouter_key() -> str:
     """
     scoped = _project_key_ctx.get()
     if scoped is None:
-        return "" if settings.require_project_llm_key else settings.openrouter_api_key
+        if settings.require_project_llm_key:
+            return ""
+        return settings.openrouter_api_key or settings.aimlapi_api_key
     return scoped
+
+
+def effective_gateway() -> str:
+    """`"openrouter"` or `"aimlapi"`: the gateway `effective_openrouter_key()` belongs to. Unscoped,
+    a server-wide OpenRouter key always wins, so setting AIMLAPI_API_KEY next to it changes nothing."""
+    if _project_key_ctx.get() is not None:
+        return _gateway_ctx.get()
+    if not settings.openrouter_api_key and settings.aimlapi_api_key:
+        return AIMLAPI
+    return OPENROUTER
+
+
+def gateway_base_url() -> str:
+    """The OpenAI-compatible base URL of the gateway in effect."""
+    return AIMLAPI_BASE_URL if effective_gateway() == AIMLAPI else settings.openrouter_base_url
+
+
+@functools.cache
+def aimlapi_http_clients() -> tuple[Any, Any]:
+    """(sync, async) httpx clients for AI/ML API calls: the OpenAI SDK's defaults, except that
+    redirects are NOT followed. A redirect off api.aimlapi.com must surface as an error, never
+    become a request that carries the workspace's key (or its prompt) to another host. Cached
+    the same way langchain-openai caches its own default clients."""
+    import openai
+
+    return (
+        openai.DefaultHttpxClient(follow_redirects=False),
+        openai.DefaultAsyncHttpxClient(follow_redirects=False),
+    )
+
+
+def gateway_client_kwargs() -> dict[str, Any]:
+    """Extra kwargs for `ChatOpenAI` / `OpenAIEmbeddings` on the gateway in effect."""
+    if effective_gateway() != AIMLAPI:
+        return {}
+    sync_client, async_client = aimlapi_http_clients()
+    return {"http_client": sync_client, "http_async_client": async_client}
 
 
 def _redis():
@@ -276,7 +336,7 @@ def _posthog_callbacks(session_id: str | None, distinct_id: str | None) -> list:
     try:
         from posthog.ai.langchain import CallbackHandler
 
-        properties: dict[str, Any] = {"$ai_provider": "openrouter"}
+        properties: dict[str, Any] = {"$ai_provider": effective_gateway()}
         if session_id:
             properties["$ai_session_id"] = session_id
         return [CallbackHandler(client=client, distinct_id=distinct_id, properties=properties)]
@@ -286,7 +346,8 @@ def _posthog_callbacks(session_id: str | None, distinct_id: str | None) -> list:
 
 
 def _encrypted_key_for(project_id: str) -> str | None:
-    """This project's ENCRYPTED OpenRouter token, or None when it has none.
+    """This project's ENCRYPTED LLM key token, or None when it has none. For a workspace on AI/ML
+    API the token is prefixed `aimlapi:` (see `_split_gateway`).
 
     Redis-cached, including the negative result — "this workspace has no key of its own" is the
     common case and would otherwise pay a Postgres round-trip per evaluated trace. Any Redis
@@ -305,12 +366,21 @@ def _encrypted_key_for(project_id: str) -> str | None:
     with SyncSessionLocal() as s:
         proj = repo.project_get(s, project_id)
         encrypted = (proj.openrouter_api_key_encrypted if proj else None) or None
+        if encrypted and getattr(proj, "llm_provider", None) == AIMLAPI:
+            encrypted = _AIMLAPI_TOKEN_PREFIX + encrypted
 
     try:
         _redis().setex(cache_key, _KEY_CACHE_TTL_S, encrypted or "")
     except Exception:
         pass
     return encrypted
+
+
+def _split_gateway(token: str) -> tuple[str, str]:
+    """`(gateway, ciphertext)` from what `_encrypted_key_for` returned."""
+    if token.startswith(_AIMLAPI_TOKEN_PREFIX):
+        return AIMLAPI, token[len(_AIMLAPI_TOKEN_PREFIX) :]
+    return OPENROUTER, token
 
 
 def invalidate_project_key(project_id: str) -> None:
@@ -334,17 +404,21 @@ def use_project_key(project_id: str) -> Iterator[None]:
     an unconfigured deployment (`llm_enabled()` false) rather than silently spending our credit.
     """
     key: str | None = None
+    gateway = OPENROUTER
     try:
         encrypted = _encrypted_key_for(project_id)
         if encrypted:
+            gateway, encrypted = _split_gateway(encrypted)
             key = _decrypt_project_key(encrypted)
     except Exception as exc:  # fail closed: a lookup hiccup must not spend the server key
         log.warning("project_key_lookup_failed", project_id=project_id, error=str(exc))
 
     token = _project_key_ctx.set(key or "")  # "" = scoped, no key (distinct from None = unscoped)
+    gw_token = _gateway_ctx.set(gateway)
     try:
         yield
     finally:
+        _gateway_ctx.reset(gw_token)
         _project_key_ctx.reset(token)
 
 
@@ -361,13 +435,19 @@ def use_server_key() -> Iterator[None]:
     `REQUIRE_PROJECT_LLM_KEY` an *unscoped* call is a path that FORGOT `use_project_key`, and
     fails closed on purpose. "We pay for this one" must not look like that bug.
     """
-    if not settings.openrouter_api_key:
+    if settings.openrouter_api_key:
+        key, gateway = settings.openrouter_api_key, OPENROUTER
+    elif settings.aimlapi_api_key:
+        key, gateway = settings.aimlapi_api_key, AIMLAPI
+    else:
         yield  # nothing to pin — unscoped rules apply (legacy direct endpoint, or disabled)
         return
-    token = _project_key_ctx.set(settings.openrouter_api_key)
+    token = _project_key_ctx.set(key)
+    gw_token = _gateway_ctx.set(gateway)
     try:
         yield
     finally:
+        _gateway_ctx.reset(gw_token)
         _project_key_ctx.reset(token)
 
 
@@ -398,7 +478,7 @@ def llm_enabled() -> bool:
         return bool(effective_openrouter_key())
     if settings.require_project_llm_key:
         return False
-    return bool(settings.openrouter_api_key or settings.llm_judge_api_key)
+    return bool(settings.openrouter_api_key or settings.aimlapi_api_key or settings.llm_judge_api_key)
 
 
 def _normalize_model(model: str) -> str:
@@ -419,7 +499,7 @@ def default_column_model_id() -> str:
     i.e. an OpenRouter key is in scope. Without one the text default, so the form never offers a
     model that cannot run."""
     column = _normalize_model(settings.column_default_model.strip())
-    if effective_openrouter_key() and column in _DECISION_MODELS:
+    if effective_openrouter_key() and effective_gateway() == OPENROUTER and column in _DECISION_MODELS:
         return column
     return default_model_id()
 
@@ -447,7 +527,8 @@ def _openrouter_models() -> dict[str, dict]:
     now = time.monotonic()
     if _models_cache["by_id"] is not None and now - _models_cache["ts"] < _MODELS_TTL_S:
         return _models_cache["by_id"]
-    key = effective_openrouter_key()
+    # The catalog is OpenRouter's: never hand it a key issued by another gateway.
+    key = effective_openrouter_key() if effective_gateway() == OPENROUTER else ""
     try:
         import httpx
 
@@ -480,6 +561,47 @@ def _openrouter_models() -> dict[str, dict]:
         # serve stale (or nothing) and retry in 60s instead of on every request
         _models_cache["ts"] = now - _MODELS_TTL_S + 60
         return _models_cache["by_id"] or {}
+
+
+_aimlapi_models_cache: dict[str, Any] = {"ts": 0.0, "by_id": None}
+
+
+def _aimlapi_chat_models() -> dict[str, dict]:
+    """`{model_id: {name, context_length}}` for the chat models AI/ML API serves on its
+    OpenAI-compatible `/chat/completions` (catalog rows with `type == "openai/chat-completions"`;
+    the same id is also listed under other endpoint types). Public, so no key is sent. Cached
+    like `_openrouter_models`, and only consulted when AI/ML API is the gateway in effect —
+    pricing of ingested spans stays on the OpenRouter catalog."""
+    now = time.monotonic()
+    cache = _aimlapi_models_cache
+    if cache["by_id"] is not None and now - cache["ts"] < _MODELS_TTL_S:
+        return cache["by_id"]
+    try:
+        import httpx
+
+        resp = httpx.get(
+            f"{AIMLAPI_BASE_URL}/models", params={"include": "all"}, timeout=10
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        rows = body.get("data", []) if isinstance(body, dict) else body
+        by_id: dict[str, dict] = {}
+        for m in rows or []:
+            mid = m.get("id")
+            if not mid or m.get("type") != "openai/chat-completions":
+                continue
+            info = m.get("info") or {}
+            ctx = info.get("contextLength")
+            by_id[str(mid)] = {
+                "name": str(info.get("name") or mid),
+                "context_length": int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else None,
+            }
+        cache.update(ts=now, by_id=by_id)
+        return by_id
+    except Exception as exc:
+        log.warning("aimlapi_models_fetch_failed", error=str(exc))
+        cache["ts"] = now - _MODELS_TTL_S + 60
+        return cache["by_id"] or {}
 
 
 def _price_key(model_id: str) -> str:
@@ -644,6 +766,18 @@ def list_models() -> list[dict[str, Any]]:
     alert summaries, a column's context fallback) filter on `kind`."""
     curated = _CURATED_MODELS
     key = effective_openrouter_key()
+    if key and effective_gateway() == AIMLAPI:
+        # AI/ML API: the curated ids it serves on chat completions, labelled from its catalog.
+        # No decision models — the Decisions API is OpenRouter's.
+        served = _aimlapi_chat_models()
+        picked = [(mid, label) for mid, label in curated if mid in served] if served else []
+        return _by_label(
+            [
+                {"id": mid, "label": label, "kind": "llm",
+                 "context_tokens": (served.get(mid) or {}).get("context_length")}
+                for mid, label in (picked or curated)
+            ]
+        )
     if not key:
         # Legacy direct OpenAI-compatible endpoint: only ids api.openai.com actually serves.
         # `openai/gpt-oss-*` is open-weights hosted by third parties — its id starts with
@@ -707,7 +841,8 @@ def get_chat_model(
         return ChatOpenAI(
             model=_normalize_model(name),
             api_key=key,
-            base_url=settings.openrouter_base_url,
+            base_url=gateway_base_url(),
+            **gateway_client_kwargs(),
             temperature=temperature,
             # Always bounded — see `Settings.llm_max_output_tokens`. Without it OpenRouter reserves
             # credit for the provider's default 64k and rejects the call outright.
@@ -999,6 +1134,11 @@ def run_decision(
     import httpx
 
     key = effective_openrouter_key()
+    if key and effective_gateway() != OPENROUTER:
+        raise RuntimeError(
+            "Decision models run on OpenRouter's Decisions API only — this workspace's key is an "
+            "AI/ML API key. Pick a text model for this column."
+        )
     if not key:
         raise RuntimeError(
             "Decision models run on OpenRouter only — this workspace has no OpenRouter API key. "

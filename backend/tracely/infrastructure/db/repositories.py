@@ -231,13 +231,18 @@ def project_ui_prefs_set(s: Session, project_id: str, prefs: dict) -> dict:
     return prefs
 
 
-def project_set_openrouter_key(s: Session, project_id: str, encrypted: str | None) -> bool:
-    """Set (or, with `encrypted=None`, clear) this workspace's own OpenRouter key. Returns False
-    if the project doesn't exist."""
+def project_set_openrouter_key(
+    s: Session, project_id: str, encrypted: str | None, provider: str | None = None
+) -> bool:
+    """Set (or, with `encrypted=None`, clear) this workspace's own LLM key. `provider` is the
+    gateway that issued it (None = OpenRouter, "aimlapi" = AI/ML API), written together with the
+    key so a key is never routed to another gateway. Returns False if the project doesn't
+    exist."""
     proj = s.get(Project, project_id)
     if proj is None:
         return False
     proj.openrouter_api_key_encrypted = encrypted
+    proj.llm_provider = provider if encrypted else None
     s.commit()
     return True
 
